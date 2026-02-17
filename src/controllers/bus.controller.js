@@ -1,4 +1,4 @@
-const busModel = require('../models/bus.model');
+const busRepo = require('../repos/bus.repo');
 
 const createBus = async (req, res) => {
 	try {
@@ -8,7 +8,7 @@ const createBus = async (req, res) => {
 			return res.status(400).json({ message: 'name and plateNumber are required' });
 		}
 
-		const bus = await busModel.createBus({ name, plateNumber, capacity, routeId, driverId, status });
+		const bus = await busRepo.create({ name, plateNumber, capacity, routeId: routeId || null, driverId: driverId || null, status: status || 'ACTIVE' });
 		res.status(201).json({ message: 'Bus created', data: bus });
 	} catch (error) {
 		res.status(500).json({ message: error.message });
@@ -17,7 +17,7 @@ const createBus = async (req, res) => {
 
 const getBus = async (req, res) => {
 	try {
-		const bus = await busModel.getBusById(req.params.id);
+		const bus = await busRepo.get(req.params.id);
 		if (!bus) return res.status(404).json({ message: 'Bus not found' });
 		res.json({ data: bus });
 	} catch (error) {
@@ -28,7 +28,7 @@ const getBus = async (req, res) => {
 const listBuses = async (req, res) => {
 	try {
 		const { routeId, status } = req.query;
-		const buses = await busModel.listBuses({ routeId, status });
+		const buses = await busRepo.list({ routeId, status });
 		res.json({ data: buses });
 	} catch (error) {
 		res.status(500).json({ message: error.message });
@@ -37,10 +37,10 @@ const listBuses = async (req, res) => {
 
 const updateBus = async (req, res) => {
 	try {
-		const bus = await busModel.getBusById(req.params.id);
+		const bus = await busRepo.get(req.params.id);
 		if (!bus) return res.status(404).json({ message: 'Bus not found' });
 
-		const updated = await busModel.updateBus(req.params.id, {
+		const updated = await busRepo.update(req.params.id, {
 			name: req.body.name,
 			plateNumber: req.body.plateNumber,
 			capacity: req.body.capacity,
@@ -57,7 +57,7 @@ const updateBus = async (req, res) => {
 
 const deleteBus = async (req, res) => {
 	try {
-		const deleted = await busModel.deleteBus(req.params.id);
+		const deleted = await busRepo.remove(req.params.id);
 		if (!deleted) return res.status(404).json({ message: 'Bus not found' });
 		res.json({ message: 'Bus deleted' });
 	} catch (error) {
@@ -78,22 +78,21 @@ const updateLocation = async (req, res) => {
 			return res.status(400).json({ message: 'latitude and longitude must be numbers' });
 		}
 
-		const bus = await busModel.getBusById(req.params.id);
+		const bus = await busRepo.get(req.params.id);
 		if (!bus) return res.status(404).json({ message: 'Bus not found' });
 
 		// Ensure driver updates only own bus when driver_id is set
-		if (bus.driver_id && req.user?.userId && bus.driver_id !== req.user.userId) {
+		if (bus.driverId && req.user?.uid && bus.driverId !== req.user.uid) {
 			return res.status(403).json({ message: 'This bus is assigned to another driver' });
 		}
 
-		await busModel.updateBusLocation(req.params.id, {
-			latitude: latNum,
-			longitude: lngNum,
+		const updated = await busRepo.updateLocation(req.params.id, {
+			currentLatitude: latNum,
+			currentLongitude: lngNum,
 			speedKph,
 			headingDeg
 		});
 
-		const updated = await busModel.getBusById(req.params.id);
 		res.json({ message: 'Location updated', data: updated });
 	} catch (error) {
 		res.status(500).json({ message: error.message });
@@ -117,12 +116,12 @@ const findNearby = async (req, res) => {
 			return res.status(400).json({ message: 'lat, lng, radiusKm, limit must be valid numbers' });
 		}
 
-		const buses = await busModel.findNearbyBuses({
+		const buses = await busRepo.findNearby({
 			lat: latNum,
 			lng: lngNum,
 			radiusKm: radiusNum,
 			limit: limitNum,
-			routeId: routeId ? Number(routeId) : undefined
+			routeId: routeId || undefined
 		});
 
 		res.json({ data: buses });

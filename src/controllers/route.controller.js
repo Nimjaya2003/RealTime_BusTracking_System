@@ -1,4 +1,4 @@
-const routeModel = require('../models/route.model');
+const routeRepo = require('../repos/route.repo');
 
 const createRoute = async (req, res) => {
     try {
@@ -8,13 +8,13 @@ const createRoute = async (req, res) => {
             return res.status(400).json({ message: 'name, startLatitude, startLongitude, endLatitude, endLongitude are required' });
         }
 
-        const route = await routeModel.createRoute({
+        const route = await routeRepo.create({
             name,
             startLatitude,
             startLongitude,
             endLatitude,
             endLongitude,
-            description
+            description: description || null
         });
 
         res.status(201).json({ message: 'Route created', data: route });
@@ -25,7 +25,7 @@ const createRoute = async (req, res) => {
 
 const listRoutes = async (_req, res) => {
     try {
-        const routes = await routeModel.listRoutes();
+        const routes = await routeRepo.list();
         res.json({ data: routes });
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -34,7 +34,7 @@ const listRoutes = async (_req, res) => {
 
 const getRoute = async (req, res) => {
     try {
-        const route = await routeModel.getRouteById(req.params.id);
+        const route = await routeRepo.get(req.params.id);
         if (!route) return res.status(404).json({ message: 'Route not found' });
         res.json({ data: route });
     } catch (error) {
@@ -44,10 +44,10 @@ const getRoute = async (req, res) => {
 
 const updateRoute = async (req, res) => {
     try {
-        const exists = await routeModel.getRouteById(req.params.id);
+        const exists = await routeRepo.get(req.params.id);
         if (!exists) return res.status(404).json({ message: 'Route not found' });
 
-        const updated = await routeModel.updateRoute(req.params.id, {
+        const updated = await routeRepo.update(req.params.id, {
             name: req.body.name,
             startLatitude: req.body.startLatitude,
             startLongitude: req.body.startLongitude,
@@ -64,7 +64,7 @@ const updateRoute = async (req, res) => {
 
 const deleteRoute = async (req, res) => {
     try {
-        const deleted = await routeModel.deleteRoute(req.params.id);
+        const deleted = await routeRepo.remove(req.params.id);
         if (!deleted) return res.status(404).json({ message: 'Route not found' });
         res.json({ message: 'Route deleted' });
     } catch (error) {

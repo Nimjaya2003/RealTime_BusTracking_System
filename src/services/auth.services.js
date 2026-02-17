@@ -1,64 +1,76 @@
-/**
- * Auth Service
- * Contains business logic related to authentication
- */
-const bcrypt = require('bcrypt');
-const db = require('../config/db');
-const jwt = require('jsonwebtoken');
+const admin = require('../config/firebase');
+
+const fstore = admin.firestore();
+const USERS_COLLECTION = 'users';
 
 const registerUser = async (name, email, password, role) => {
-    const [existingUser] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
-    if (existingUser.length > 0) {
+    const normalizedRole = (role || 'PASSENGER').toUpperCase();
+
+    // Fail fast if user already exists
+    try {
+        await admin.auth().getUserByEmail(email);
         throw new Error('User already exists');
+    } catch (err) {
+        if (err.code !== 'auth/user-not-found') {
+            throw err;
+        }
     }
 
-    
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const userRecord = await admin.auth().createUser({
+        email,
+        password,
+        displayName: name,
+    });
 
-    // 3. Insert user into DB
-    await db.execute(
-        'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)',
-        [name, email, hashedPassword, role || 'PASSENGER']
-    );
+    await admin.auth().setCustomUserClaims(userRecord.uid, { role: normalizedRole });
+
+    await fstore.collection(USERS_COLLECTION).doc(userRecord.uid).set({
+        uid: userRecord.uid,
+        name,
+        email,
+        role: normalizedRole,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
     return true;
 };
 
-// LOGIN
 const loginUser = async (email, password) => {
-    const [rows] = await db.execute(
-        'SELECT id, password, role FROM users WHERE email = ?',
-        [email]
-    );
-
-    if (rows.length === 0) {
-        throw new Error('Invalid email or password');
+    if (!process.env.FIREBASE_API_KEY) {
+        throw new Error('FIREBASE_API_KEY is not set');
     }
 
-    const user = rows[0];
+    const resp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${process.env.FIREBASE_API_KEY}`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password, returnSecureToken: true }),
+        }
+    );
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-        throw new Error('Invalid email or password');
+    const data = await resp.json();
+
+    if (!resp.ok) {
+        const message = data.error?.message || 'Invalid email or password';
+        throw new Error(message);
     }
 
-    // Generate JWT
-    const token = jwt.sign(
-        { userId: user.id, role: user.role },
-        process.env.JWT_SECRET,
-        { expiresIn: '1d' }
-    );
+    const userRecord = await admin.auth().getUser(data.localId);
+    const role = userRecord.customClaims?.role || 'PASSENGER';
 
     return {
-        token,
-        role: user.role
+        token: data.idToken,
+        refreshToken: data.refreshToken,
+        role,
+        expiresIn: data.expiresIn,
+        uid: data.localId,
     };
 };
 
-
 module.exports = {
     registerUser,
-    loginUser
+    loginUser,
 };
 
     
