@@ -1,23 +1,43 @@
-const db = require('../config/db');
+// Firebase Auth + Firestore-backed User model (replaces legacy SQL implementation)
+const admin = require('../config/firebase');
 
-exports.createUser = async (name, email, password, role) => {
-    const query = `
-        INSERT INTO users (name, email, password, role)
-        VALUES (?, ?, ?, ?)
-    `;
-    const [result] = await db.execute(query, [
-        name,
-        email,
-        password,
-        role
-    ]);
-    return result;
+const usersCol = admin.firestore().collection('users');
+const serverTs = () => admin.firestore.FieldValue.serverTimestamp();
+
+// Creates an auth user and a profile document; expects password to be a plain text password
+// because Firebase Auth hashes internally. If you need to import bcrypt hashes, use the
+// Firebase Admin importUsers API instead (see previous migration script).
+const createUser = async (name, email, password, role = 'PASSENGER') => {
+  const userRecord = await admin.auth().createUser({ displayName: name, email, password });
+  const normalizedRole = (role || 'PASSENGER').toUpperCase();
+  await admin.auth().setCustomUserClaims(userRecord.uid, { role: normalizedRole });
+
+  await usersCol.doc(userRecord.uid).set({
+    uid: userRecord.uid,
+    name,
+    email,
+    role: normalizedRole,
+    createdAt: serverTs(),
+  });
+
+  return { uid: userRecord.uid, name, email, role: normalizedRole };
 };
 
-exports.findUserByEmail = async (email) => {
-    const query = `
-        SELECT * FROM users WHERE email = ?
-    `;
-    const [rows] = await db.execute(query, [email]);
-    return rows[0];
+const findUserByEmail = async (email) => {
+  try {
+    const userRecord = await admin.auth().getUserByEmail(email);
+    const profileSnap = await usersCol.doc(userRecord.uid).get();
+    const profile = profileSnap.exists ? profileSnap.data() : {};
+    return {
+      uid: userRecord.uid,
+      email: userRecord.email,
+      name: userRecord.displayName,
+      role: profile.role || userRecord.customClaims?.role || 'PASSENGER',
+    };
+  } catch (err) {
+    if (err.code === 'auth/user-not-found') return null;
+    throw err;
+  }
 };
+
+module.exports = { createUser, findUserByEmail };

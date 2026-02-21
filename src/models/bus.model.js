@@ -1,166 +1,128 @@
-const db = require('../config/db');
+// Firestore-backed Bus model (replaces legacy SQL implementation)
+const admin = require('../config/firebase');
+
+const busesCol = admin.firestore().collection('buses');
+
+const serverTs = () => admin.firestore.FieldValue.serverTimestamp();
 
 const createBus = async ({
-	name,
-	plateNumber,
-	capacity,
-	routeId,
-	driverId,
-	status = 'ACTIVE'
+  name,
+  plateNumber,
+  capacity,
+  routeId,
+  driverId,
+  status = 'ACTIVE',
 }) => {
-	const [result] = await db.execute(
-		`INSERT INTO buses (name, plate_number, capacity, route_id, driver_id, status)
-		 VALUES (?, ?, ?, ?, ?, ?)` ,
-		[name, plateNumber, capacity || null, routeId || null, driverId || null, status]
-	);
-	return getBusById(result.insertId);
+  const payload = {
+    name,
+    plateNumber,
+    capacity: capacity ?? null,
+    routeId: routeId ?? null,
+    driverId: driverId ?? null,
+    status,
+    createdAt: serverTs(),
+  };
+
+  const ref = await busesCol.add(payload);
+  const snap = await ref.get();
+  return { id: ref.id, ...snap.data() };
 };
 
 const getBusById = async (id) => {
-	const [rows] = await db.execute(
-		'SELECT * FROM buses WHERE id = ? LIMIT 1',
-		[id]
-	);
-	return rows[0] || null;
+  const snap = await busesCol.doc(id).get();
+  return snap.exists ? { id, ...snap.data() } : null;
 };
 
 const getBusByDriverId = async (driverId) => {
-	const [rows] = await db.execute(
-		'SELECT * FROM buses WHERE driver_id = ? LIMIT 1',
-		[driverId]
-	);
-	return rows[0] || null;
+  if (!driverId) return null;
+
+  let snaps = await busesCol.where('driverId', '==', driverId).limit(1).get();
+  if (!snaps.empty) {
+    const doc = snaps.docs[0];
+    return { id: doc.id, ...doc.data() };
+  }
+
+  // Support legacy numeric driver ids stored during migration (uid format: legacy_123)
+  const legacyMatch = /^legacy_(\d+)$/.exec(driverId);
+  if (legacyMatch) {
+    const legacyId = Number(legacyMatch[1]);
+    snaps = await busesCol.where('driverLegacyId', '==', legacyId).limit(1).get();
+    if (!snaps.empty) {
+      const doc = snaps.docs[0];
+      return { id: doc.id, ...doc.data() };
+    }
+  }
+
+  return null;
 };
 
-const listBuses = async ({ routeId, status }) => {
-	const conditions = [];
-	const params = [];
-
-	if (routeId) {
-		conditions.push('route_id = ?');
-		params.push(routeId);
-	}
-
-	if (status) {
-		conditions.push('status = ?');
-		params.push(status);
-	}
-
-	const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-	const [rows] = await db.execute(
-		`SELECT * FROM buses ${where} ORDER BY id DESC`,
-		params
-	);
-
-	return rows;
+const listBuses = async ({ routeId, status } = {}) => {
+  let q = busesCol;
+  if (routeId) q = q.where('routeId', '==', routeId);
+  if (status) q = q.where('status', '==', status);
+  const snaps = await q.get();
+  return snaps.docs.map((d) => ({ id: d.id, ...d.data() }));
 };
 
 const updateBus = async (id, data) => {
-	const fields = [];
-	const params = [];
-
-	if (data.name !== undefined) {
-		fields.push('name = ?');
-		params.push(data.name);
-	}
-	if (data.plateNumber !== undefined) {
-		fields.push('plate_number = ?');
-		params.push(data.plateNumber);
-	}
-	if (data.capacity !== undefined) {
-		fields.push('capacity = ?');
-		params.push(data.capacity);
-	}
-	if (data.routeId !== undefined) {
-		fields.push('route_id = ?');
-		params.push(data.routeId);
-	}
-	if (data.driverId !== undefined) {
-		fields.push('driver_id = ?');
-		params.push(data.driverId);
-	}
-	if (data.status !== undefined) {
-		fields.push('status = ?');
-		params.push(data.status);
-	}
-
-	if (!fields.length) return getBusById(id);
-
-	params.push(id);
-
-	await db.execute(
-		`UPDATE buses SET ${fields.join(', ')} WHERE id = ?`,
-		params
-	);
-
-	return getBusById(id);
+  await busesCol.doc(id).update({ ...data, updatedAt: serverTs() });
+  return getBusById(id);
 };
 
 const deleteBus = async (id) => {
-	const [result] = await db.execute('DELETE FROM buses WHERE id = ?', [id]);
-	return result.affectedRows > 0;
+  await busesCol.doc(id).delete();
+  return true;
 };
 
-const updateBusLocation = async (id, {
-	latitude,
-	longitude,
-	speedKph = null,
-	headingDeg = null
-}) => {
-	const [result] = await db.execute(
-		`UPDATE buses
-		 SET current_latitude = ?,
-			 current_longitude = ?,
-			 speed_kph = ?,
-			 heading_deg = ?,
-			 last_ping_at = NOW()
-		 WHERE id = ?`,
-		[latitude, longitude, speedKph, headingDeg, id]
-	);
-	return result.affectedRows > 0;
+const updateBusLocation = async (id, { latitude, longitude, speedKph = null, headingDeg = null }) => {
+  await busesCol.doc(id).update({
+    currentLatitude: latitude,
+    currentLongitude: longitude,
+    speedKph,
+    headingDeg,
+    lastPingAt: serverTs(),
+    updatedAt: serverTs(),
+  });
+  return getBusById(id);
+};
+
+const haversineKm = (lat1, lon1, lat2, lon2) => {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 };
 
 const findNearbyBuses = async ({ lat, lng, radiusKm = 5, limit = 5, routeId }) => {
-	const conditions = ['current_latitude IS NOT NULL', 'current_longitude IS NOT NULL'];
-	const params = [lat, lng, lat];
+  let q = busesCol;
+  if (routeId) q = q.where('routeId', '==', routeId);
+  const snaps = await q.get();
 
-	if (routeId) {
-		conditions.push('route_id = ?');
-		params.push(routeId);
-	}
+  const withDistances = snaps.docs
+    .map((d) => {
+      const data = d.data();
+      if (data.currentLatitude == null || data.currentLongitude == null) return null;
+      const distanceKm = haversineKm(lat, lng, data.currentLatitude, data.currentLongitude);
+      return { id: d.id, ...data, distanceKm };
+    })
+    .filter(Boolean)
+    .filter((b) => b.distanceKm <= radiusKm)
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .slice(0, limit);
 
-	const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-
-	const [rows] = await db.execute(
-		`SELECT *,
-			(6371 * ACOS(
-				COS(RADIANS(?))
-				* COS(RADIANS(current_latitude))
-				* COS(RADIANS(current_longitude) - RADIANS(?))
-				+ SIN(RADIANS(?))
-				* SIN(RADIANS(current_latitude))
-			)) AS distance_km
-		 FROM buses
-		 ${where}
-		 HAVING distance_km <= ?
-		 ORDER BY distance_km ASC
-		 LIMIT ?`,
-		[...params, radiusKm, limit]
-	);
-
-	return rows;
+  return withDistances;
 };
 
 module.exports = {
-	createBus,
-	getBusById,
-	getBusByDriverId,
-	listBuses,
-	updateBus,
-	deleteBus,
-	updateBusLocation,
-	findNearbyBuses
+  createBus,
+  getBusById,
+  getBusByDriverId,
+  listBuses,
+  updateBus,
+  deleteBus,
+  updateBusLocation,
+  findNearbyBuses,
 };
-
-
